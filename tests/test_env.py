@@ -6,7 +6,7 @@ from gymnasium.wrappers import FlattenObservation
 
 import game2048  # noqa: F401
 from game2048 import Game2048Env, NormalizedBoard, OneHotBoard
-from game2048.agents import AGENTS
+from game2048.agents import BASELINES, PPOAgent
 from game2048.evaluate import evaluate
 from game2048.game import LEFT, RIGHT
 
@@ -141,14 +141,33 @@ def test_vector_env():
     envs.close()
 
 
-@pytest.mark.parametrize("name", sorted(AGENTS))
+@pytest.mark.parametrize("name", sorted(BASELINES))
 def test_baseline_agents_finish_episodes(name):
-    result = evaluate(Game2048Env(), AGENTS[name](seed=0), episodes=3, seed=0)
+    result = evaluate(Game2048Env(), BASELINES[name](seed=0), episodes=3, seed=0)
     assert len(result.scores) == 3 and all(s > 0 for s in result.scores)
 
 
 def test_greedy_beats_random():
     env = Game2048Env()
-    random_scores = evaluate(env, AGENTS["random"](seed=0), episodes=30, seed=0).scores
-    greedy_scores = evaluate(env, AGENTS["greedy"](seed=0), episodes=30, seed=0).scores
+    random_scores = evaluate(env, BASELINES["random"](seed=0), episodes=30, seed=0).scores
+    greedy_scores = evaluate(env, BASELINES["greedy"](seed=0), episodes=30, seed=0).scores
     assert np.mean(greedy_scores) > np.mean(random_scores)
+
+
+def test_ppo_agent_round_trip(tmp_path):
+    sb3_contrib = pytest.importorskip("sb3_contrib")
+    from sb3_contrib.common.wrappers import ActionMasker
+
+    env = gym.make("Game2048-v0", reward_mode="log")
+    env = FlattenObservation(OneHotBoard(env))
+    env = ActionMasker(env, lambda e: e.unwrapped.action_masks())
+    model = sb3_contrib.MaskablePPO("MlpPolicy", env, n_steps=64, batch_size=64, n_epochs=1)
+    model.learn(total_timesteps=64)
+    path = tmp_path / "ppo"
+    model.save(path)
+
+    result = evaluate(Game2048Env(), PPOAgent(str(path), seed=0), episodes=2, seed=0)
+    assert len(result.scores) == 2
+
+    with pytest.raises(ValueError, match="observations of shape"):
+        PPOAgent(str(path), size=3)

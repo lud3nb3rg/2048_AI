@@ -10,7 +10,9 @@ from typing import Any, Protocol
 
 import numpy as np
 
+from game2048.env import Game2048Env
 from game2048.game import ACTIONS, DOWN, LEFT, RIGHT, UP, move
+from game2048.wrappers import OneHotBoard
 
 
 class Agent(Protocol):
@@ -57,8 +59,43 @@ class CornerAgent:
         return next((a for a in self.PRIORITY if mask[a]), DOWN)
 
 
-AGENTS: dict[str, type] = {
+class PPOAgent:
+    """A trained ``MaskablePPO`` checkpoint (one-hot, flattened observations)."""
+
+    def __init__(
+        self,
+        path: str,
+        seed: int | None = None,
+        size: int = 4,
+        deterministic: bool = True,
+    ) -> None:
+        # Imported here so the baselines don't pull in torch.
+        from sb3_contrib import MaskablePPO
+
+        self.model = MaskablePPO.load(path, device="cpu")
+        if seed is not None:
+            self.model.set_random_seed(seed)
+        self.deterministic = deterministic
+        self.encode = OneHotBoard(Game2048Env(size=size))  # reuse its .observation()
+        expected = (int(np.prod(self.encode.observation_space.shape)),)
+        if self.model.observation_space.shape != expected:
+            raise ValueError(
+                f"model expects observations of shape {self.model.observation_space.shape}, "
+                f"but a one-hot {size}x{size} board flattens to {expected}"
+            )
+
+    def __call__(self, obs: np.ndarray, info: dict[str, Any]) -> int:
+        x = self.encode.observation(obs).ravel()
+        action, _ = self.model.predict(
+            x, action_masks=info["action_mask"], deterministic=self.deterministic
+        )
+        return int(action)
+
+
+BASELINES: dict[str, type] = {
     "random": RandomAgent,
     "greedy": GreedyAgent,
     "corner": CornerAgent,
 }
+
+AGENTS: dict[str, type] = {**BASELINES, "ppo": PPOAgent}

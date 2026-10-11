@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import gymnasium as gym
 import numpy as np
 
-from game2048.agents import AGENTS, Agent
+from game2048.agents import AGENTS, Agent, PPOAgent
 
 
 @dataclass
@@ -70,13 +70,25 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--size", type=int, default=4)
     parser.add_argument("--render", action="store_true", help="print every move")
+    parser.add_argument("--model", help="path to a trained checkpoint (required for --agent ppo)")
+    parser.add_argument(
+        "--stochastic", action="store_true", help="sample actions instead of taking the argmax"
+    )
     args = parser.parse_args(argv)
+
+    if args.agent == "ppo":
+        if not args.model:
+            parser.error("--agent ppo requires --model PATH")
+        agent = PPOAgent(
+            args.model, seed=args.seed, size=args.size, deterministic=not args.stochastic
+        )
+    else:
+        agent = AGENTS[args.agent](seed=args.seed)
 
     env = gym.make(
         "Game2048-v0", size=args.size, render_mode="human" if args.render else None
     )
-    agent = AGENTS[args.agent](seed=args.seed)
-    print(f"agent: {args.agent}")
+    print(f"agent: {args.agent}" + (f" ({args.model})" if args.model else ""))
     print(evaluate(env, agent, args.episodes, seed=args.seed).summary())
     env.close()
 
