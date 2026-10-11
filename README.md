@@ -7,11 +7,12 @@ environment and [MaskablePPO](https://sb3-contrib.readthedocs.io/en/master/modul
   <img src="docs/replay.gif" width="320" alt="The trained agent playing 2048 and reaching the 2048 tile">
 </p>
 
-*The final model (5M training steps) playing its best of 200 games: 32,992 points, reaching 2048 in 1,714 moves.*
+*The final model (10M training steps) playing its best of 200 games: 39,912 points, reaching 2048 in 2,090 moves.*
 
 | Agent (500 games, seeds 10,000–10,499) | Mean score | Reaches 512 | Reaches 1024 | Reaches 2048 |
 |---|---|---|---|---|
-| **PPO, CNN, 5M steps (final)** | **13,569** | **93.8%** | **63.0%** | **8.2%** |
+| **PPO, CNN, 10M steps (final)** | **17,405** | **97.4%** | **79.6%** | **18.8%** |
+| PPO, CNN, 5M steps | 13,569 | 93.8% | 63.0% | 8.2% |
 | PPO, MLP, 1M steps | 3,733 | 27.4% | 0.8% | 0% |
 | `corner` heuristic (down > left > right > up) | 2,600 | 5.6% | 0% | 0% |
 
@@ -23,8 +24,9 @@ uv run pytest                                  # 42 tests: game rules, Gymnasium
 uv run play-2048                               # play it yourself (w/a/s/d)
 uv run eval-2048 --agent corner --episodes 500 --seed 10000
 uv run python -u scripts/train_ppo.py          # train 5M steps from scratch (~2.6 h on a laptop CPU)
-uv run eval-2048 --agent ppo --model checkpoints/ppo_cnn64_norm/final.zip --episodes 500 --seed 10000
-uv run replay-2048 --model checkpoints/ppo_cnn64_norm/final.zip --best-of 200 --open
+uv run python -u scripts/train_ppo.py --resume checkpoints/ppo_cnn64_norm/final.zip   # +5M steps
+uv run eval-2048 --agent ppo --model checkpoints/ppo_cnn64_norm/final_10M.zip --episodes 500 --seed 10000
+uv run replay-2048 --model checkpoints/ppo_cnn64_norm/final_10M.zip --best-of 200 --open
 ```
 
 Checkpoints aren't committed (`checkpoints/` is git-ignored), so train a model before evaluating or replaying it.
@@ -85,7 +87,7 @@ Profiling showed where the time went, and four changes followed:
 | `DummyVecEnv` instead of `SubprocVecEnv` | A game step (~86 µs) is cheaper than the inter-process round trips; 2× faster env stepping |
 | Batched evaluation | Plays 256 games in lockstep with one network call per move: **18× faster**, identical results |
 
-### 6. The fixes: reward normalization and separate networks
+### 6. The fixes: reward normalization and separate networks (0–5M steps)
 
 - **`VecNormalize(norm_reward=True)`** scales returns to roughly unit size, which the value head can fit.
 - **`share_features_extractor=False`** gives the policy and the value function separate CNNs, so large value-loss
@@ -101,10 +103,29 @@ improving for all 5M steps:
 | 2M | 10,425 | 88.2% | 40.8% | 3.2% |
 | 3M | 10,986 | 89.2% | 48.0% | 3.6% |
 | 4M | 12,734 | 92.2% | 61.4% | 6.8% |
-| **5M (final)** | **13,569** | **93.8%** | **63.0%** | **8.2%** |
+| **5M** | **13,569** | **93.8%** | **63.0%** | **8.2%** |
 
 At 1M steps this model roughly doubles the MLP's score at the same number of steps. Training ran at ~520 steps/s,
 so 5M steps took about 2.6 hours on an Intel Core Ultra 7 155H (CPU only).
+
+### 7. Training longer with a decaying learning rate
+
+The model was still improving at 5M steps, but its progress was uneven: flat from 2.5M to 3.5M, then a jump. So
+training resumed from the 5M checkpoint for another 5M steps, with the learning rate falling linearly from 3e-4 to
+0 over the new segment. The reward-normalization statistics were carried over, so the value targets kept the same
+scale.
+
+| Checkpoint | Learning rate | Mean score | Reaches 512 | Reaches 1024 | Reaches 2048 |
+|---|---|---|---|---|---|
+| 5M (start) | 3e-4 | 13,569 | 93.8% | 63.0% | 8.2% |
+| 6M | 2.4e-4 | 14,912 | 95.4% | 68.8% | 14.4% |
+| 7M | 1.8e-4 | 15,269 | 95.6% | 68.8% | 13.4% |
+| 8M | 1.2e-4 | 15,884 | 95.8% | 75.0% | 13.2% |
+| 9M | 0.6e-4 | 16,430 | 97.2% | 74.6% | 18.2% |
+| **10M (final)** | 0 | **17,405** | **97.4%** | **79.6%** | **18.8%** |
+
+Every checkpoint beat the one before on mean score, and the 2048 rate more than doubled. The 6M and 9M checkpoints
+each made a 4096 tile in one of the 500 games.
 
 ### Final configuration
 
@@ -117,16 +138,18 @@ so 5M steps took about 2.6 hours on an Intel Core Ultra 7 155H (CPU only).
 | Environments | 16 × `DummyVecEnv` |
 | `n_steps` / `batch_size` / `n_epochs` | 512 / 2048 / 4 |
 | `gamma` / `gae_lambda` | 0.99 / 0.95 |
-| Learning rate | 3e-4 constant (the script now defaults to 3e-4 falling linearly to 0) |
+| Learning rate | 3e-4 constant for 0–5M, then 3e-4 falling linearly to 0 for 5M–10M |
 | `ent_coef` / `clip_range` | 0.01 / 0.2 |
 
-The full script is [scripts/train_ppo.py](scripts/train_ppo.py). `--resume CHECKPOINT` continues a run with its
-saved reward statistics.
+The full script is [scripts/train_ppo.py](scripts/train_ppo.py). A fresh run now uses the decaying learning rate
+from the start. `--resume CHECKPOINT` continues a run with its saved reward statistics.
 
 ### What's next
 
-- **Longer training with a decaying learning rate.** The model was still improving at 5M steps. A continuation to
-  10M steps, with the learning rate falling linearly from 3e-4 to 0, is the next experiment.
+- **A longer horizon.** With `gamma=0.99` the agent effectively plans about 100 moves ahead, while building a 4096
+  tile takes thousands. A fresh run with `gamma=0.995` or `0.999` is the most direct way to reward longer-term setup.
+- **Score reward.** Under `"log"`, making a 4096 pays barely more than a 2048 (see [Reward design](#reward-design)).
+  `"score"` weights big merges much more heavily, at the cost of noisier returns.
 - **N-tuple networks with TD learning.** The strongest published 2048 learners use lookup tables over groups of
   cells instead of a neural network, and reach 2048 in roughly 90% of games.
 
