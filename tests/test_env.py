@@ -7,7 +7,7 @@ from gymnasium.wrappers import FlattenObservation
 import game2048  # noqa: F401
 from game2048 import Game2048Env, NormalizedBoard, OneHotBoard
 from game2048.agents import BASELINES, PPOAgent
-from game2048.evaluate import evaluate
+from game2048.evaluate import evaluate, evaluate_batched
 from game2048.game import LEFT, RIGHT
 
 STUCK = np.array([[1, 2, 1, 2], [2, 1, 2, 1], [1, 2, 1, 2], [2, 1, 2, 1]], dtype=np.uint8)
@@ -132,6 +132,15 @@ def test_one_hot_encoding():
     assert flat.reset(seed=0)[0].shape == (18 * 16,)
 
 
+def test_one_hot_batch_matches_single():
+    env = OneHotBoard(Game2048Env())
+    boards = np.stack([env.unwrapped.reset(seed=i)[0] for i in range(5)])
+    batch = env.observation(boards)
+    assert batch.shape == (5, 18, 4, 4)
+    for board, encoded in zip(boards, batch):
+        np.testing.assert_array_equal(env.observation(board), encoded)
+
+
 def test_vector_env():
     envs = gym.make_vec("Game2048-v0", num_envs=4, vectorization_mode="sync")
     obs, info = envs.reset(seed=0)
@@ -154,20 +163,40 @@ def test_greedy_beats_random():
     assert np.mean(greedy_scores) > np.mean(random_scores)
 
 
-def test_ppo_agent_round_trip(tmp_path):
+@pytest.mark.parametrize("arch", ["mlp", "cnn"])
+def test_ppo_agent_round_trip(tmp_path, arch):
     sb3_contrib = pytest.importorskip("sb3_contrib")
     from sb3_contrib.common.wrappers import ActionMasker
 
-    env = gym.make("Game2048-v0", reward_mode="log")
-    env = FlattenObservation(OneHotBoard(env))
+    env = OneHotBoard(gym.make("Game2048-v0", reward_mode="log"))
+    policy_kwargs = None
+    if arch == "mlp":
+        env = FlattenObservation(env)
+    else:
+        from game2048.networks import Conv2048
+
+        policy_kwargs = dict(
+            features_extractor_class=Conv2048,
+            features_extractor_kwargs=dict(filters=8, features_dim=16),
+        )
     env = ActionMasker(env, lambda e: e.unwrapped.action_masks())
-    model = sb3_contrib.MaskablePPO("MlpPolicy", env, n_steps=64, batch_size=64, n_epochs=1)
+    model = sb3_contrib.MaskablePPO(
+        "MlpPolicy", env, n_steps=64, batch_size=64, n_epochs=1, policy_kwargs=policy_kwargs
+    )
     model.learn(total_timesteps=64)
     path = tmp_path / "ppo"
     model.save(path)
 
-    result = evaluate(Game2048Env(), PPOAgent(str(path), seed=0), episodes=2, seed=0)
-    assert len(result.scores) == 2
+    agent = PPOAgent(str(path), seed=0)
+    assert agent.flatten == (arch == "mlp")
+    result = evaluate(Game2048Env(), agent, episodes=6, seed=0)
+    assert len(result.scores) == 6
+
+    # Batched play (fewer slots than episodes, so slots get reused) matches sequential play.
+    batched = evaluate_batched(agent, episodes=6, seed=0, batch_size=4)
+    assert batched.scores == result.scores
+    assert batched.max_tiles == result.max_tiles
+    assert batched.steps == result.steps
 
     with pytest.raises(ValueError, match="observations of shape"):
         PPOAgent(str(path), size=3)

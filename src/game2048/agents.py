@@ -60,7 +60,12 @@ class CornerAgent:
 
 
 class PPOAgent:
-    """A trained ``MaskablePPO`` checkpoint (one-hot, flattened observations)."""
+    """A trained ``MaskablePPO`` checkpoint on one-hot observations.
+
+    Works with both MLP checkpoints (flattened ``(channels * size * size,)`` input)
+    and CNN checkpoints (``(channels, size, size)`` input); the layout is read from
+    the checkpoint's observation space.
+    """
 
     def __init__(
         self,
@@ -70,26 +75,49 @@ class PPOAgent:
         deterministic: bool = True,
     ) -> None:
         # Imported here so the baselines don't pull in torch.
+        from pathlib import Path
+
         from sb3_contrib import MaskablePPO
 
+        if not (Path(path).is_file() or Path(f"{path}.zip").is_file()):
+            raise FileNotFoundError(f"no checkpoint at {path!r}")
         self.model = MaskablePPO.load(path, device="cpu")
         if seed is not None:
             self.model.set_random_seed(seed)
         self.deterministic = deterministic
         self.encode = OneHotBoard(Game2048Env(size=size))  # reuse its .observation()
-        expected = (int(np.prod(self.encode.observation_space.shape)),)
-        if self.model.observation_space.shape != expected:
+        grid = self.encode.observation_space.shape
+        flat = (int(np.prod(grid)),)
+        model_shape = self.model.observation_space.shape
+        if model_shape not in (grid, flat):
             raise ValueError(
-                f"model expects observations of shape {self.model.observation_space.shape}, "
-                f"but a one-hot {size}x{size} board flattens to {expected}"
+                f"model expects observations of shape {model_shape}, but a one-hot "
+                f"{size}x{size} board is {grid} (or {flat} flattened)"
             )
+        self.flatten = model_shape == flat
 
     def __call__(self, obs: np.ndarray, info: dict[str, Any]) -> int:
-        x = self.encode.observation(obs).ravel()
-        action, _ = self.model.predict(
-            x, action_masks=info["action_mask"], deterministic=self.deterministic
-        )
-        return int(action)
+        return int(self.act_batch(obs[None], info["action_mask"][None])[0])
+
+    def act_batch(self, boards: np.ndarray, masks: np.ndarray) -> np.ndarray:
+        """Pick moves for ``(N, size, size)`` boards with ``(N, 4)`` masks in one forward pass."""
+        x = self.encode.observation(boards)
+        if self.flatten:
+            x = x.reshape(len(boards), -1)
+        actions, _ = self.model.predict(x, action_masks=masks, deterministic=self.deterministic)
+        return actions
+
+    def action_probs(self, board: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """The policy's probability for each of the 4 moves (0 for illegal ones)."""
+        import torch
+
+        x = self.encode.observation(board[None])
+        if self.flatten:
+            x = x.reshape(1, -1)
+        obs, _ = self.model.policy.obs_to_tensor(x)
+        with torch.no_grad():
+            dist = self.model.policy.get_distribution(obs, action_masks=mask[None])
+        return dist.distribution.probs[0].cpu().numpy()
 
 
 BASELINES: dict[str, type] = {

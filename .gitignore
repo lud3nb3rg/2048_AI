@@ -13,3 +13,4 @@ wheels/
 # Training
 runs/
 checkpoints/
+replays/

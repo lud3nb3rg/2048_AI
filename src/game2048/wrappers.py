@@ -27,8 +27,9 @@ class OneHotBoard(gym.ObservationWrapper):
         self._eye = np.eye(self.channels, dtype=np.float32)
 
     def observation(self, observation: np.ndarray) -> np.ndarray:
+        """Encode one ``(size, size)`` board, or a batch of shape ``(N, size, size)``."""
         clipped = np.minimum(observation, self.channels - 1)
-        return np.ascontiguousarray(np.moveaxis(self._eye[clipped], -1, 0))
+        return np.ascontiguousarray(np.moveaxis(self._eye[clipped], -1, -3))
 
 
 class NormalizedBoard(gym.ObservationWrapper):
