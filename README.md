@@ -4,17 +4,21 @@ A reinforcement-learning agent that learns to play 2048, built on a custom [Gymn
 environment and [MaskablePPO](https://sb3-contrib.readthedocs.io/en/master/modules/ppo_mask.html) from sb3-contrib.
 
 <p align="center">
-  <img src="docs/replay.gif" width="320" alt="The trained agent playing 2048 and reaching the 2048 tile">
+  <img src="docs/replay.gif" width="320" alt="The trained agent playing 2048 and reaching the 4096 tile">
 </p>
 
-*The final model (10M training steps) playing its best of 200 games: 39,912 points, reaching 2048 in 2,090 moves.*
+*The best model (128-filter CNN, 30M training steps) playing its best of 200 games: 74,612 points, reaching 4096 in
+3,551 moves. Shown at 50 moves per second.*
 
-| Agent (500 games, seeds 10,000–10,499) | Mean score | Reaches 512 | Reaches 1024 | Reaches 2048 |
-|---|---|---|---|---|
-| **PPO, CNN, 10M steps (final)** | **17,405** | **97.4%** | **79.6%** | **18.8%** |
-| PPO, CNN, 5M steps | 13,569 | 93.8% | 63.0% | 8.2% |
-| PPO, MLP, 1M steps | 3,733 | 27.4% | 0.8% | 0% |
-| `corner` heuristic (down > left > right > up) | 2,600 | 5.6% | 0% | 0% |
+| Agent (500 games, seeds 10,000–10,499) | Mean score | Reaches 512 | Reaches 1024 | Reaches 2048 | Reaches 4096 |
+|---|---|---|---|---|---|
+| **PPO, CNN (128 filters), γ=0.995, 30M steps (best)** | **32,580** | **99.6%** | **96.2%** | **69.8%** | **10.0%** |
+| PPO, CNN (64 filters), γ=0.99, 10M steps | 17,405 | 97.4% | 79.6% | 18.8% | 0% |
+| PPO, MLP, 1M steps | 3,733 | 27.4% | 0.8% | 0% | 0% |
+| `corner` heuristic (down > left > right > up) | 2,600 | 5.6% | 0% | 0% | 0% |
+
+On 2,000 fresh games (seeds 20,000–21,999), the best model averages 34,447 points, reaches 2048 in 75.2% of games
+and 4096 in 12.6%, and made an 8192 tile three times.
 
 ## Quick start
 
@@ -23,17 +27,20 @@ uv sync
 uv run pytest                                  # 42 tests: game rules, Gymnasium API, agents, replays
 uv run play-2048                               # play it yourself (w/a/s/d)
 uv run eval-2048 --agent corner --episodes 500 --seed 10000
-uv run python -u scripts/train_ppo.py          # train 5M steps from scratch (~2.6 h on a laptop CPU)
-uv run python -u scripts/train_ppo.py --resume checkpoints/ppo_cnn64_norm/final.zip   # +5M steps
-uv run eval-2048 --agent ppo --model checkpoints/ppo_cnn64_norm/final_10M.zip --episodes 500 --seed 10000
-uv run replay-2048 --model checkpoints/ppo_cnn64_norm/final_10M.zip --best-of 200 --open
+
+# Train the best model (~70 min on a single GPU; drop --device cuda to train on the CPU, which is far slower)
+uv run python -u scripts/train_ppo.py --run-name ppo_cnn128_norm_g0995_30M --device cuda \
+  --filters 128 --gamma 0.995 --total-timesteps 30000000 --lr-decay-from 0.6666667 --checkpoint-every 1000000
+
+uv run eval-2048 --agent ppo --model checkpoints/ppo_cnn128_norm_g0995_30M/final_30M.zip --episodes 500 --seed 10000
+uv run replay-2048 --model checkpoints/ppo_cnn128_norm_g0995_30M/final_30M.zip --best-of 200 --open
 ```
 
 Checkpoints aren't committed (`checkpoints/` is git-ignored), so train a model before evaluating or replaying it.
 
 ---
 
-## How the final model was reached
+## How the best model was reached
 
 All numbers below come from the same evaluation: 500 games on seeds 10,000–10,499, which no model trained on, with
 deterministic play (the most likely legal move) unless noted.
@@ -122,10 +129,74 @@ scale.
 | 7M | 1.8e-4 | 15,269 | 95.6% | 68.8% | 13.4% |
 | 8M | 1.2e-4 | 15,884 | 95.8% | 75.0% | 13.2% |
 | 9M | 0.6e-4 | 16,430 | 97.2% | 74.6% | 18.2% |
-| **10M (final)** | 0 | **17,405** | **97.4%** | **79.6%** | **18.8%** |
+| **10M** | 0 | **17,405** | **97.4%** | **79.6%** | **18.8%** |
 
 Every checkpoint beat the one before on mean score, and the 2048 rate more than doubled. The 6M and 9M checkpoints
 each made a 4096 tile in one of the 500 games.
+
+### 8. Moving to a GPU
+
+Everything so far ran on a laptop CPU at ~520 steps/s. On a single GPU (`--device cuda`), the same setup runs at
+**~7,800 steps/s, 15× faster**: 10M steps take about 21 minutes instead of about 5 hours. That made the longer
+experiments below practical. The game itself still runs on the CPU; what the GPU speeds up is the network updates,
+which had been ~70% of the training time.
+
+### 9. A longer horizon: `gamma` 0.99 → 0.995
+
+With `gamma=0.99`, rewards more than ~100 moves away barely count, but a good game now lasts over 1,000 moves.
+Raising `gamma` to 0.995 (an effective horizon of ~200 moves) was the only change in this run. The schedule was the
+same: 3e-4 for 5M steps, then falling linearly to 0 at 10M.
+
+| Model | Mean score | Reaches 512 | Reaches 1024 | Reaches 2048 | Reaches 4096 |
+|---|---|---|---|---|---|
+| γ=0.99, 5M | 13,569 | 93.8% | 63.0% | 8.2% | 0% |
+| γ=0.995, 5M | 13,996 | 90.4% | 66.8% | 16.4% | 0% |
+| γ=0.99, 10M | 17,405 | 97.4% | 79.6% | 18.8% | 0% |
+| **γ=0.995, 10M** | **18,696** | 96.4% | **82.2%** | **27.4%** | **0.4%** |
+
+Looking further ahead doubled the 2048 rate at 5M steps and raised it by ~9 points at 10M. The cost is a few more
+early losses (a slightly lower 512 rate): the agent takes more risks for bigger tiles. All later runs use 0.995.
+
+### 10. Much longer training
+
+Two ways to spend more steps were compared:
+
+- **A longer run:** 30M steps from scratch, at a constant 3e-4 for 20M steps, then falling linearly to 0.
+- **A fine-tune:** the 10M γ=0.995 model trained for another 10M steps, at 1e-4 falling to 0.
+
+| Model | Learning rate at that point | Mean score | Reaches 1024 | Reaches 2048 | Reaches 4096 |
+|---|---|---|---|---|---|
+| Longer run, 10M | 3e-4 | 17,389 | 79.6% | 23.6% | 0.6% |
+| Longer run, 20M | 3e-4 | 24,193 | 90.2% | 51.0% | 3.0% |
+| Longer run, 25M | 1.5e-4 | 27,473 | 93.0% | 62.0% | 5.2% |
+| **Longer run, 30M** | 0 | **31,676** | **96.2%** | **71.6%** | **9.8%** |
+| Fine-tune, 20M | 0 | 22,924 | 91.8% | 41.0% | 2.0% |
+
+Steps at the full learning rate were the main limit. At 20M steps, still at a constant 3e-4, the longer run already
+beat every earlier model, and the final 10M steps of decay took the 2048 rate from 51% to 72%. The fine-tune is
+cheaper (+10M steps instead of 30M from scratch) but levels off much lower.
+
+### 11. A bigger network: 128 filters
+
+The CNN went down to 64 filters only to make laptop training affordable (step 5). On the GPU, the 30M-step run was
+repeated with 128 filters (4.2M parameters instead of ~2M), at ~7,000 steps/s (72 minutes).
+
+| Model | Mean score | Reaches 1024 | Reaches 2048 | Reaches 4096 |
+|---|---|---|---|---|
+| 128 filters, 20M | 23,766 | 90.2% | 47.4% | 2.2% |
+| 128 filters, 25M | 26,225 | 93.0% | 54.6% | 4.8% |
+| **128 filters, 30M** | **32,580** | **96.2%** | **69.8%** | **10.0%** |
+
+The two network sizes were level at 20M and 30M steps on the usual 500 games. On 2,000 fresh games (seeds
+20,000–21,999), the 128-filter model comes out ahead:
+
+| 30M steps, 2,000 games | Mean score | Median | Reaches 2048 | Reaches 4096 | Reaches 8192 |
+|---|---|---|---|---|---|
+| **128 filters** | **34,447** | **35,174** | **75.2%** | **12.6%** | 3 games |
+| 64 filters | 32,187 | 33,008 | 72.7% | 9.8% | 1 game |
+
+The 4096 gap is about three standard errors, well outside evaluation noise; the 2048 gap is borderline. Each setting was trained once, so part
+of the difference may come from the training seed.
 
 ### Final configuration
 
@@ -133,23 +204,28 @@ each made a 4096 tile in one of the 500 games.
 |---|---|
 | Algorithm | MaskablePPO (sb3-contrib) |
 | Observation | One-hot board, 18 × 4 × 4 |
-| Network | `Conv2048` (1×2 / 2×1 filters, 64 filters, 256 features), separate for policy and value, 256-unit heads |
+| Network | `Conv2048` (1×2 / 2×1 filters, **128 filters**, 256 features), separate for policy and value, 256-unit heads |
 | Reward | `"log"`, normalized with `VecNormalize` |
 | Environments | 16 × `DummyVecEnv` |
+| Steps | **30M** |
 | `n_steps` / `batch_size` / `n_epochs` | 512 / 2048 / 4 |
-| `gamma` / `gae_lambda` | 0.99 / 0.95 |
-| Learning rate | 3e-4 constant for 0–5M, then 3e-4 falling linearly to 0 for 5M–10M |
+| `gamma` / `gae_lambda` | **0.995** / 0.95 |
+| Learning rate | 3e-4 for 20M steps, then falling linearly to 0 at 30M |
 | `ent_coef` / `clip_range` | 0.01 / 0.2 |
+| Training time | ~72 minutes on a single GPU |
 
-The full script is [scripts/train_ppo.py](scripts/train_ppo.py). A fresh run now uses the decaying learning rate
-from the start. `--resume CHECKPOINT` continues a run with its saved reward statistics.
+The full script is [scripts/train_ppo.py](scripts/train_ppo.py); the [quick start](#quick-start) command reproduces
+this model. Other options: `--lr`, `--run-name`, `--checkpoint-every`, and `--resume CHECKPOINT` to start from an
+existing model. `--time-limit SECONDS` stops cleanly and saves `latest.zip`; running the same command again resumes
+from it, with the learning-rate schedule intact.
 
 ### What's next
 
-- **A longer horizon.** With `gamma=0.99` the agent effectively plans about 100 moves ahead, while building a 4096
-  tile takes thousands. A fresh run with `gamma=0.995` or `0.999` is the most direct way to reward longer-term setup.
-- **Score reward.** Under `"log"`, making a 4096 pays barely more than a 2048 (see [Reward design](#reward-design)).
-  `"score"` weights big merges much more heavily, at the cost of noisier returns.
+- **Train even longer.** The 30M runs were still improving when their learning rate reached 0. A 100M-step run with
+  128 filters is the obvious next experiment.
+- **An even longer horizon.** Games now last ~1,800 moves, so `gamma=0.999` (an effective horizon of ~1,000 moves)
+  may help again.
+- **Several seeds per setting**, to separate real differences (like 64 vs 128 filters) from training noise.
 - **N-tuple networks with TD learning.** The strongest published 2048 learners use lookup tables over groups of
   cells instead of a neural network, and reach 2048 in roughly 90% of games.
 
