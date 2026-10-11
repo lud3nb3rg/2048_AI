@@ -1,0 +1,29 @@
+[project]
+name = "2048-ai"
+version = "0.1.0"
+description = "A Gymnasium reinforcement-learning environment for the game 2048"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "gymnasium>=1.0",
+    "numpy>=2.0",
+]
+
+[project.scripts]
+play-2048 = "game2048.play:main"
+eval-2048 = "game2048.evaluate:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.10.7,<0.11"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "game2048"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
